@@ -49,14 +49,18 @@ public class AssetDataCompletion {
         KafkaProducer<String, String> producer = new KafkaProducer<>(producerProps);
 
         System.out.println(String.format("######### start to send message: total[%s]", jsons.size()));
-        int i = 0;
+        int i = 0, currentPercent = 0;
         for (String json : jsons) {
-            System.out.println("send: " + json);
-            ProducerRecord<String, String> record = new ProducerRecord<>(topic, json);
+            ProducerRecord<String, String> record = new ProducerRecord<>("enos-iam.resource.operate.event",  json);
             producer.send(record);
             i++;
-            System.out.println(processBar(i, json.length()));
+            if (i * 100 / jsons.size() > currentPercent) {
+                currentPercent++;
+                System.out.println(processBar(i, jsons.size()));
+            }
         }
+        producer.flush();
+        producer.close();
         System.out.println("######### finish send messages");
 
     }
@@ -66,9 +70,9 @@ public class AssetDataCompletion {
         StringBuilder bar = new StringBuilder("[");
         for (int i = 0; i < 10; ++i) {
             if (percent-- > 0) {
-                bar.append("***");
+                bar.append("**");
             } else {
-                bar.append("---");
+                bar.append("--");
             }
         }
         bar.append("]  " + pos * 100 / total + "%");
@@ -76,14 +80,57 @@ public class AssetDataCompletion {
     }
 
     public static List<String> parseData(String fileDest) throws IOException {
+        List<String> results = new ArrayList<>();
         List<String> jsons = new ArrayList<>();
+        Map<String, String> treeId2OrgId = new HashMap<>();
         try (FileReader fr = new FileReader(fileDest);
              BufferedReader bufr = new BufferedReader(fr)) {
             String line = null;
             while ((line = bufr.readLine()) != null) {
-                jsons.add(line);
+                if (line.length() > 1) {
+                    line = line.substring(1, line.length() - 1);
+                }
+
+                Map map = JsonUtil.fromJson(line, Map.class);
+                ExternalResourceEvent event = new ExternalResourceEvent();
+                event.actions = Arrays.asList("read", "write", "control");
+                event.displayOrder = 0;
+                event.operationType = "create";
+                event.resourceType = "asset_node";
+                event.externalId = (String) map.getOrDefault("instanceId", "");
+                event.organizationId = (String) map.getOrDefault("__OU", "");
+                event.parentExternalId = (String) map.getOrDefault("treeId", "");
+                event.name = new HashMap<>();
+                event.name.put("default", (String) map.getOrDefault("nameOFdefault", ""));
+                event.name.put("en_US", (String) map.getOrDefault("nameOFen_US", ""));
+                event.name.put("zh_CN", (String) map.getOrDefault("nameOFzh_CN", ""));
+
+                treeId2OrgId.put((String) map.getOrDefault("treeId", ""), (String) map.getOrDefault("__OU", ""));
+
+                jsons.add(JsonUtil.toJson(event));
+                event.parentExternalId = "assets.virtual." + event.organizationId;
+                jsons.add(JsonUtil.toJson(event));
+            }
+            for (Map.Entry<String, String> entry : treeId2OrgId.entrySet()) {
+                ExternalResourceEvent event = new ExternalResourceEvent();
+                event.actions = Arrays.asList("read", "write", "control");
+                event.displayOrder = 0;
+                event.operationType = "create";
+                event.resourceType = "asset_node";
+                event.externalId = entry.getKey();
+                event.organizationId = entry.getValue();
+                event.parentExternalId = null;
+                event.name = new HashMap<>();
+//                event.name.put("default", (String) map.getOrDefault("nameOFdefault", ""));
+//                event.name.put("en_US", (String) map.getOrDefault("nameOFen_US", ""));
+//                event.name.put("zh_CN", (String) map.getOrDefault("nameOFzh_CN", ""));
+                results.add(JsonUtil.toJson(event));
+            }
+            results.addAll(jsons);
+            for(String result:results){
+                System.out.println(result);
             }
         }
-        return jsons;
+        return results;
     }
 }
