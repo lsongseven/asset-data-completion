@@ -6,9 +6,9 @@ import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.serialization.StringSerializer;
 
-import java.io.FileInputStream;
+import java.io.BufferedReader;
+import java.io.FileReader;
 import java.io.IOException;
-import java.io.InputStream;
 import java.util.*;
 
 /**
@@ -18,7 +18,7 @@ import java.util.*;
 public class AssetDataCompletion {
     public static void main(String[] args) throws IOException {
 
-        String bootStrapServer, topic, fileDest;
+        String bootstrapServer, topic, fileDest;
         Map<String, List<String>> params = new HashMap<>();
         for (int i = 0; i < args.length; ++i) {
             if (args[i].startsWith("--")) {
@@ -30,40 +30,40 @@ public class AssetDataCompletion {
                 i--;
             }
         }
-        bootStrapServer = String.join(",", params.getOrDefault("--bootstrap-server", new ArrayList<>()));
+        bootstrapServer = String.join(",", params.getOrDefault("--bootstrap-server", new ArrayList<>()));
         topic = String.join(",", params.getOrDefault("--topic", new ArrayList<>()));
         fileDest = String.join(",", params.getOrDefault("--file-dest", new ArrayList<>()));
-        if ("".equals(bootStrapServer) || "".equals(topic) || "".equals(fileDest)) {
+        if ("".equals(bootstrapServer) || "".equals(topic) || "".equals(fileDest)) {
             System.err.println("invalid parameter, follow --bootstrap-server <bootstrap-server> --topic <topic> --file-dest <file-dest>");
             return;
         }
-        System.out.println("\n params = " + params);
-        System.out.println("\n start to parse file");
+        System.out.println("params = " + params);
+        System.out.println("######### start to parse file");
         List<String> jsons = parseData(fileDest);
-        System.out.println("\n parse done");
+        System.out.println("######### parse done");
 
         Properties producerProps = new Properties();
-        producerProps.setProperty(CommonClientConfigs.BOOTSTRAP_SERVERS_CONFIG, bootStrapServer);
+        producerProps.setProperty(CommonClientConfigs.BOOTSTRAP_SERVERS_CONFIG, bootstrapServer);
         producerProps.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getCanonicalName());
         producerProps.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getCanonicalName());
         KafkaProducer<String, String> producer = new KafkaProducer<>(producerProps);
 
-        System.out.println(String.format("\n start to send message: total[%s]", jsons.size()));
+        System.out.println(String.format("######### start to send message: total[%s]", jsons.size()));
         int i = 0;
         for (String json : jsons) {
-            System.out.println("\n send: " + json);
+            System.out.println("send: " + json);
             ProducerRecord<String, String> record = new ProducerRecord<>(topic, json);
             producer.send(record);
             i++;
             System.out.println(processBar(i, json.length()));
         }
-        System.out.println("\n finish send messages");
+        System.out.println("######### finish send messages");
 
     }
 
     public static String processBar(int pos, int total) {
         int percent = pos * 10 / total;
-        StringBuilder bar = new StringBuilder("\n [");
+        StringBuilder bar = new StringBuilder("[");
         for (int i = 0; i < 10; ++i) {
             if (percent-- > 0) {
                 bar.append("***");
@@ -76,9 +76,14 @@ public class AssetDataCompletion {
     }
 
     public static List<String> parseData(String fileDest) throws IOException {
-        try (InputStream inputStream = new FileInputStream(fileDest)) {
-
+        List<String> jsons = new ArrayList<>();
+        try (FileReader fr = new FileReader(fileDest);
+             BufferedReader bufr = new BufferedReader(fr)) {
+            String line = null;
+            while ((line = bufr.readLine()) != null) {
+                jsons.add(line);
+            }
         }
-        return null;
+        return jsons;
     }
 }
