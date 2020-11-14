@@ -51,7 +51,7 @@ public class AssetDataCompletion {
         System.out.println(String.format("######### start to send message: total[%s]", jsons.size()));
         int i = 0, currentPercent = 0;
         for (String json : jsons) {
-            ProducerRecord<String, String> record = new ProducerRecord<>("enos-iam.resource.operate.event",  json);
+            ProducerRecord<String, String> record = new ProducerRecord<>("enos-iam.resource.operate.event", json);
             producer.send(record);
             i++;
             if (i * 100 / jsons.size() > currentPercent) {
@@ -75,7 +75,7 @@ public class AssetDataCompletion {
                 bar.append("--");
             }
         }
-        bar.append("]  " + pos * 100 / total + "%");
+        bar.append("]  " + pos * 100 / total + "% (do not terminate the process until you see 'finish send message'");
         return bar.toString();
     }
 
@@ -87,29 +87,34 @@ public class AssetDataCompletion {
              BufferedReader bufr = new BufferedReader(fr)) {
             String line = null;
             while ((line = bufr.readLine()) != null) {
-                if (line.length() > 1) {
-                    line = line.substring(1, line.length() - 1);
+                try{
+                    if (line.length() > 1) {
+                        line = line.substring(1, line.length() - 1);
+                    }
+
+                    Map map = JsonUtil.fromJson(line, Map.class);
+                    ExternalResourceEvent event = new ExternalResourceEvent();
+                    event.actions = Arrays.asList("read", "write", "control");
+                    event.displayOrder = 0;
+                    event.operationType = "create";
+                    event.resourceType = "asset_node";
+                    event.externalId = (String) map.getOrDefault("instanceId", "");
+                    event.organizationId = (String) map.getOrDefault("__OU", "");
+                    event.parentExternalId = (String) map.getOrDefault("treeId", "");
+                    event.name = new HashMap<>();
+                    event.name.put("default", (String) map.getOrDefault("nameOFdefault", ""));
+                    event.name.put("en_US", (String) map.getOrDefault("nameOFen_US", ""));
+                    event.name.put("zh_CN", (String) map.getOrDefault("nameOFzh_CN", ""));
+
+                    treeId2OrgId.put((String) map.getOrDefault("treeId", ""), (String) map.getOrDefault("__OU", ""));
+
+                    jsons.add(JsonUtil.toJson(event));
+                    event.parentExternalId = "assets.virtual." + event.organizationId;
+                    jsons.add(JsonUtil.toJson(event));
+                }catch (Exception e){
+                    System.err.println(e.getMessage());
+                    System.err.println("parse error: "+line);
                 }
-
-                Map map = JsonUtil.fromJson(line, Map.class);
-                ExternalResourceEvent event = new ExternalResourceEvent();
-                event.actions = Arrays.asList("read", "write", "control");
-                event.displayOrder = 0;
-                event.operationType = "create";
-                event.resourceType = "asset_node";
-                event.externalId = (String) map.getOrDefault("instanceId", "");
-                event.organizationId = (String) map.getOrDefault("__OU", "");
-                event.parentExternalId = (String) map.getOrDefault("treeId", "");
-                event.name = new HashMap<>();
-                event.name.put("default", (String) map.getOrDefault("nameOFdefault", ""));
-                event.name.put("en_US", (String) map.getOrDefault("nameOFen_US", ""));
-                event.name.put("zh_CN", (String) map.getOrDefault("nameOFzh_CN", ""));
-
-                treeId2OrgId.put((String) map.getOrDefault("treeId", ""), (String) map.getOrDefault("__OU", ""));
-
-                jsons.add(JsonUtil.toJson(event));
-                event.parentExternalId = "assets.virtual." + event.organizationId;
-                jsons.add(JsonUtil.toJson(event));
             }
             for (Map.Entry<String, String> entry : treeId2OrgId.entrySet()) {
                 ExternalResourceEvent event = new ExternalResourceEvent();
@@ -121,13 +126,13 @@ public class AssetDataCompletion {
                 event.organizationId = entry.getValue();
                 event.parentExternalId = null;
                 event.name = new HashMap<>();
-//                event.name.put("default", (String) map.getOrDefault("nameOFdefault", ""));
-//                event.name.put("en_US", (String) map.getOrDefault("nameOFen_US", ""));
-//                event.name.put("zh_CN", (String) map.getOrDefault("nameOFzh_CN", ""));
+                event.name.put("default", "default_tree_name");
+                event.name.put("en_US", "en_us_tree_name");
+                event.name.put("zh_CN", "zh_cn_tree_name");
                 results.add(JsonUtil.toJson(event));
             }
             results.addAll(jsons);
-            for(String result:results){
+            for (String result : results) {
                 System.out.println(result);
             }
         }
