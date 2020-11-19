@@ -3,7 +3,6 @@ package com.envisioniot.enos.asset.data.completion;
 import com.alibaba.dubbo.config.ApplicationConfig;
 import com.alibaba.dubbo.config.ReferenceConfig;
 import com.alibaba.dubbo.config.RegistryConfig;
-import com.envision.eos.commons.pojo.DataPage;
 import com.envisioniot.enos.iam.api.dto.ContextUser;
 import com.envisioniot.enos.iam.api.dto.Organization;
 import com.envisioniot.enos.iam.api.enums.CertificationState;
@@ -15,7 +14,6 @@ import com.envisioniot.enos.iam.api.rpc.OrganizationService;
 import com.envisioniot.enos.model_service.share.ITSLInstanceService;
 import com.envisioniot.enos.model_service.share.data.auth.Audit;
 import com.envisioniot.enos.model_service.share.data.i18n.TSLStringI18n;
-import com.envisioniot.enos.model_service.share.data.query.filters.IFilter;
 import com.envisioniot.enos.model_service.share.data.response.MSPageRsp;
 import com.envisioniot.enos.model_service.share.data.tsl.TSLInstance;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
@@ -30,10 +28,7 @@ import java.io.BufferedReader;
 import java.io.FileReader;
 import java.io.IOException;
 import java.util.*;
-import java.util.concurrent.LinkedBlockingDeque;
-import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.stream.Collectors;
 
 /**
@@ -41,6 +36,9 @@ import java.util.stream.Collectors;
  * @Date 2020/11/12 20:03
  */
 public class AssetDataCompletion {
+
+    private static final int PAGE_SIZE = 1000;
+
     public static void main(String[] args) throws IOException {
 
         String bootstrapServer, topic, fileDest, zkServer;
@@ -60,10 +58,17 @@ public class AssetDataCompletion {
         fileDest = String.join(",", params.getOrDefault("--file-dest", new ArrayList<>()));
         zkServer = String.join(",", params.getOrDefault("--zk-server", new ArrayList<>()));
         if ("".equals(bootstrapServer) || "".equals(topic) || ("".equals(fileDest) && "".equals(zkServer))) {
-            System.err.println("invalid parameter, follow --bootstrap-server <bootstrap-server> --topic <topic> --file-dest <file-dest>");
+            System.err.println("invalid parameter, follow --bootstrap-server <bootstrap-server> --topic <topic> [--zk-server <zk-server>] [--file-dest <file-dest>]\n" +
+                    "\n" +
+                    "Option\t\t\t\t\t\tDescription\n" +
+                    "--bootstrap-server\t\t\tThe address of any kafka broker \n" +
+                    "--topic\t\t\t\t\t\tThe kafka topic name, here is 'enos-iam.resource.operate.event'\n" +
+                    "--zk-server\t\t\t\t\t(Optional) The address of zookeeper which is used as the dubbo register\n" +
+                    "--file-dest\t\t\t\t\t(Optional) The path of file which contains neo4j data of the asset tree");
             return;
         }
         System.out.println("params = " + params);
+
         List<String> messages = new ArrayList<>();
         if (!"".equals(fileDest)) {
             System.out.println("######### start to parse file");
@@ -98,7 +103,7 @@ public class AssetDataCompletion {
         producer.flush();
         producer.close();
         System.out.println("######### finish send messages");
-
+        System.exit(1);
     }
 
     public static String processBar(int pos, int total) {
@@ -145,8 +150,6 @@ public class AssetDataCompletion {
 
                     treeId2OrgId.put((String) map.getOrDefault("treeId", ""), (String) map.getOrDefault("__OU", ""));
 
-                    jsons.add(JsonUtil.toJson(event));
-                    event.parentExternalId = "assets.virtual." + event.organizationId;
                     jsons.add(JsonUtil.toJson(event));
                 } catch (Exception e) {
                     System.err.println(e.getMessage());
@@ -207,42 +210,34 @@ public class AssetDataCompletion {
     }
 
 
+    @SneakyThrows
     private static void batchProcess(List<String> orgIds, String zkServer, List<String> results) {
-        int corePoolSize = 100;
+        long start = System.currentTimeMillis();
+        int corePoolSize = 300;
         ThreadFactory threadFactory = new ThreadFactoryBuilder().setNameFormat("rpc-pool-%d").build();
-        ThreadPoolExecutor threadPool = new ThreadPoolExecutor(corePoolSize, corePoolSize, 10L, TimeUnit.SECONDS, new LinkedBlockingDeque<>(100), threadFactory);
-        for (int i = 0; i < orgIds.size(); i += orgIds.size() / corePoolSize) {
-            int start = i;
-            int end = Math.min((start + orgIds.size() / corePoolSize), orgIds.size());
-            threadPool.execute(() -> {
-                List<String> subOrgIds = orgIds.subList(start, end);
-                threadTask(subOrgIds, zkServer, results);
-            });
+        ThreadPoolExecutor executorService = new ThreadPoolExecutor(corePoolSize, corePoolSize, 10L, TimeUnit.SECONDS, new LinkedBlockingDeque<>(500), threadFactory);
+        ITSLInstanceService itslInstanceService = getITSLInstanceService(zkServer);
+        List<CompletableFuture<Void>> pageFutures = new ArrayList<>();
+//        futureTasks("o16056681415101814",zkServer,results,executorService,itslInstanceService,pageFutures);
+        for (String orgId : orgIds) {
+            futureTasks(orgId, zkServer, results, executorService, itslInstanceService, pageFutures);
         }
-        threadPool.shutdown();
-        while (true) {
-            try {
-                Thread.sleep(1000);
-            } catch (InterruptedException e) {
-                e.printStackTrace();
-            }
-            if (threadPool.isTerminated()) {
-                break;
-            }
-        }
+        System.out.println("waiting for futures done: ");
+        CompletableFuture.allOf(pageFutures.toArray(new CompletableFuture[0])).get();
+        System.out.println("futures all done: elapsed time " + (System.currentTimeMillis() - start) + " ms");
+
     }
 
-    private static void threadTask(List<String> orgIds, String zkServer, List<String> results) {
-        ITSLInstanceService itslInstanceService = getITSLInstanceService(zkServer);
-        for (String orgId : orgIds) {
-            Audit audit = new Audit(orgId, "sysenos2018");
-            IFilter filter = null;
-            int currentPage = 1, pageSize = 1000;
-            MSPageRsp<TSLInstance> response;
-            do {
-                response = itslInstanceService.queryTSLInstanceByFilter(orgId, filter, pageSize, currentPage++, audit);
-                DataPage<TSLInstance> data = response.getData();
-                List<String> ouAssetMessages = data.getRecord().stream().map(tslInstance -> {
+    private static void futureTasks(String orgId, String zkServer, List<String> results, ThreadPoolExecutor executorService, ITSLInstanceService itslInstanceService, List<CompletableFuture<Void>> pageFutures) {
+        MSPageRsp<TSLInstance> tslInstanceMSPageRsp = itslInstanceService.queryTSLInstanceByFilter(orgId, null, PAGE_SIZE, 1, new Audit());
+        int total = tslInstanceMSPageRsp.getData().getTotalRecordCount();
+        int currentPage = 0;
+        while ((currentPage++ * PAGE_SIZE) <= total) {
+            int finalCurrentPage = currentPage;
+            CompletableFuture<Void> pageFuture = CompletableFuture.supplyAsync(() -> {
+//                ITSLInstanceService itslInstanceService1 = getITSLInstanceService(zkServer);
+                MSPageRsp<TSLInstance> tslInstanceMSPageRsp1 = itslInstanceService.queryTSLInstanceByFilter(orgId, null, PAGE_SIZE, finalCurrentPage, new Audit());
+                List<String> ouAssetMessages = tslInstanceMSPageRsp1.getData().getRecord().stream().map(tslInstance -> {
                     ExternalResourceEvent event = new ExternalResourceEvent();
                     event.actions = Arrays.asList("read", "write", "control");
                     event.displayOrder = 0;
@@ -258,9 +253,12 @@ public class AssetDataCompletion {
                     event.name.put("zh_CN", tslInstanceName.getLocalizedValue(Locale.SIMPLIFIED_CHINESE.toString()));
                     return event;
                 }).map(JsonUtil::toJson).collect(Collectors.toList());
-                results.addAll(ouAssetMessages);
-                System.out.println(results.size());
-            } while (response.getData().hasNextPage());
+                return ouAssetMessages;
+            }, executorService).thenAcceptAsync(messages -> {
+                results.addAll(messages);
+                System.out.println(String.format("%s: ou, %s, message size: %s", Thread.currentThread().getName(), orgId, results.size()));
+            }, executorService);
+            pageFutures.add(pageFuture);
         }
     }
 }
